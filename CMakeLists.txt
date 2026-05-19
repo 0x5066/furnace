@@ -147,6 +147,11 @@ option(CONSOLE_SUBSYSTEM "Build Furnace with Console subsystem on Windows" OFF)
 option(FORCE_CODEVIEW "Force -gcodeview on MinGW GCC" OFF)
 option(FLATPAK_WORKAROUNDS "Enable Flatpak-specific workaround for system file picker" OFF)
 option(NO_INTRO "Disable intro animation entirely" OFF)
+if (WIN32)
+  option(BUILD_WINAMP_PLUGIN "Build a Winamp 2.x input plugin DLL (in_furnace.dll)" OFF)
+else()
+  set(BUILD_WINAMP_PLUGIN OFF)
+endif()
 option(ORIG_NDS_CORE "Use original NDS emulation core (no acquireDirect)" OFF)
 if (APPLE)
   option(FORCE_APPLE_BIN "Force enable binary installation to /bin" OFF)
@@ -307,6 +312,10 @@ if (USE_SNDFILE)
     # Ogg, Vorbis, FLAC and MP3
     if (WITH_OGG)
       list(APPEND DEPENDENCIES_DEFINES HAVE_OGG)
+      set(BUILD_SHARED_LIBS   OFF CACHE BOOL "Force static vendored libs" FORCE)
+      set(VORBIS_BUILD_SHARED OFF CACHE BOOL "No shared libvorbis"        FORCE)
+      set(OGG_BUILD_SHARED    OFF CACHE BOOL "No shared libogg"           FORCE)
+      set(FLAC_BUILD_SHARED   OFF CACHE BOOL "No shared libFLAC"          FORCE)
       set(OGG_INCLUDE_DIR extern/libogg/include CACHE STRING "Ogg include dir" FORCE)
       set(OGG_LIBRARY Ogg::ogg CACHE STRING "Ogg library" FORCE)
       set(Vorbis_Vorbis_INCLUDE_DIR extern/libvorbis/include CACHE STRING "Vorbis include dir" FORCE)
@@ -337,6 +346,8 @@ if (USE_SNDFILE)
     endif()
 
     # the rest
+    #set(ENABLE_PACKAGE_CONFIG OFF CACHE BOOL "Disable libsndfile CMake package config install" FORCE)
+    #set(INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "Disable libsndfile pkg-config module install" FORCE)
     set(BUILD_TESTING OFF CACHE BOOL "aaaaaa" FORCE)
     set(BUILD_PROGRAMS OFF CACHE BOOL "aaa" FORCE)
     set(BUILD_EXAMPLES OFF CACHE BOOL "a" FORCE)
@@ -1208,6 +1219,12 @@ if (WITH_LOCALE)
 endif()
 
 set(USED_SOURCES ${ENGINE_SOURCES} ${AUDIO_SOURCES} ${CLI_SOURCES} src/main.cpp)
+set(WINAMP_PLUGIN_SOURCES
+  ${ENGINE_SOURCES}
+  ${AUDIO_SOURCES}
+  src/in_furnace.cpp
+  src/in_furnace_config.cpp
+)
 
 if (USE_BACKWARD)
   list(APPEND USED_SOURCES src/backtrace.cpp)
@@ -1316,6 +1333,55 @@ elseif(WIN32 AND NOT CONSOLE_SUBSYSTEM)
   add_executable(${FURNACE} WIN32 ${USED_SOURCES})
 else()
   add_executable(${FURNACE} ${USED_SOURCES})
+endif()
+
+if (BUILD_WINAMP_PLUGIN)
+  # add_library(in_furnace SHARED ${WINAMP_PLUGIN_SOURCES})
+
+  file(TOUCH "${CMAKE_CURRENT_BINARY_DIR}/prefspage.rc")
+  add_library(in_furnace SHARED ${WINAMP_PLUGIN_SOURCES} "${CMAKE_CURRENT_BINARY_DIR}/prefspage.rc")
+  add_custom_command(
+      OUTPUT
+          "${CMAKE_CURRENT_BINARY_DIR}/prefspage.rc"
+      COMMAND ${CMAKE_RC_COMPILER} "-i" "${CMAKE_CURRENT_SOURCE_DIR}/src/prefspage.res" "-o" "${CMAKE_CURRENT_BINARY_DIR}/prefspage.rc"
+      DEPENDS
+          "${CMAKE_CURRENT_SOURCE_DIR}/src/prefspage.res"
+    )
+    add_custom_target(resources
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/prefspage.res"
+    )
+
+  # Plugin must export undecorated C symbols (winampGetInModule2, etc.)
+  set_target_properties(in_furnace PROPERTIES
+    OUTPUT_NAME "in_furnace"
+    PREFIX ""                         # no "lib" prefix
+    SUFFIX ".dll"
+  )
+
+  target_include_directories(in_furnace SYSTEM PRIVATE
+    ${DEPENDENCIES_INCLUDE_DIRS}
+  )
+
+  target_compile_definitions(in_furnace PRIVATE
+    ${DEPENDENCIES_DEFINES}
+    UNICODE_INPUT_PLUGIN              # wchar_t paths; selects IN_VER in in2.h
+  )
+
+  #target_compile_options(in_furnace PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS} -O0 -g3)
+  target_compile_options(in_furnace PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS})
+
+  # Link the same dependency libraries as the main executable,
+  # plus the Windows multimedia / COM libraries needed by Winamp plugins.
+  target_link_libraries(in_furnace PRIVATE
+    ${DEPENDENCIES_LIBRARIES}
+    -static         # keep the DLL self-contained (MinGW)
+  )
+
+  message(STATUS "Building Winamp input plugin (in_furnace.dll)")
+else()
+  if (WIN32)
+    message(STATUS "Not building Winamp input plugin (enable with -DBUILD_WINAMP_PLUGIN=ON)")
+  endif()
 endif()
 
 if (MAKE_BUNDLE AND NOT FORCE_APPLE_BIN)
