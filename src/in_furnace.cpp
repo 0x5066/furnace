@@ -303,7 +303,7 @@ static bool renderChunk(short* pcmOut, int samplesPerChan) {
       // and if you think otherwise, you're wrong and stupid
       float l = chL[i]; if (l >  1.f) l =  1.f; if (l < -1.f) l = -1.f;
       float r = chR[i]; if (r >  1.f) r =  1.f; if (r < -1.f) r = -1.f;
-      pcmOut[i] = ((short)(l * 32767.f) + (short)(r * 32767.f)) /2;
+      pcmOut[i] = ((short)(l * 32767.f) + (short)(r * 32767.f)) / 2;
     }
   }
   return true;
@@ -996,13 +996,16 @@ static bool getFurFileInfo(const in_char* wpath, FurFileInfo& out) {
 
   if (!eng->load(buf, bufLen, path.c_str())) { delete[] buf; return false; }
 
-  // calcSongTimestamps populates ts for every subsong but may leave curSubSong
-  // at an arbitrary index when done. Call it first, then always explicitly
-  // select the target subsong so curSubSong is correct for all reads below.
-  selectSubsong(eng, (subsongIdx > 0 && subsongIdx < (int)eng->song.subsong.size())
-                     ? subsongIdx : 0);
-
+  // calcSongTimestamps ONLY computes ts.totalTicks for whichever subsong
+  // curSubSong points to at call time — it does NOT iterate all subsongs.
+  // Select the target subsong first so timestamps are computed for it.
+  // Then re-select after, because calcSongTimestamps may reset curSubSong
+  // as a side-effect of its internal tick simulation.
+  int targetIdx = (subsongIdx > 0 && subsongIdx < (int)eng->song.subsong.size())
+                  ? subsongIdx : 0;
+  selectSubsong(eng, targetIdx);
   eng->calcSongTimestamps();
+  selectSubsong(eng, targetIdx);  // re-select; calcSongTimestamps may have changed it
 
   // Song metadata
   WString wname   = utf8To16(eng->song.name.c_str());
@@ -1371,33 +1374,27 @@ static int FURNACE_Play(const in_char* fn) {
   plugin.VSASetInfo(FURNACE_SAMPLERATE, FURNACE_CHANNELS());
 
   //plugin.SetInfo(gEngine.song.chans, FURNACE_SAMPLERATE / 1000, FURNACE_CHANNELS, 1);
+  // Select the target subsong BEFORE calcSongTimestamps so timestamps are
+  // computed for the correct subsong. calcSongTimestamps only runs for
+  // curSubSong at call time — it does not iterate all subsongs.
+  // After calcSongTimestamps, re-select because it may reset curSubSong.
+  // The final selectSubsong before play() ensures play()/reset() commits
+  // the correct subsong's speed, groove, hz, and virtualTempo to chip state.
+  if (subsongIdx > 0 && subsongIdx < (int)gEngine.song.subsong.size())
+    selectSubsong(&gEngine, subsongIdx);
+
   gEngine.calcSongTimestamps();
   gTimestampsReady = 1;
 
-  // -----------------------------------------------------------------------
-  // Subsong handling
-  // -----------------------------------------------------------------------
-  // If this is a plain file (no ?subsong= suffix) and the module contains
-  // multiple subsongs, inject one virtual playlist entry per additional
-  // subsong.  The guard prevents re-expansion when the same file is played
-  // again while subsong entries are still in the playlist.
+  // Expand multi-subsong modules into the playlist (subsong 0 only, once).
   if (subsongIdx == 0 && (int)gEngine.song.subsong.size() > 1
       && !subsongAlreadyInPlaylist(actualFn))
     expandSubsongsIntoPlaylist(actualFn);
 
-  // Switch to the requested subsong (no-op for subsong 0).
-  if (subsongIdx > 0 && subsongIdx < (int)gEngine.song.subsong.size()) {
-    selectSubsong(&gEngine, subsongIdx);
-    gEngine.calcSongTimestamps();   // recalculate for the selected subsong
-  }
-
-  // Select the target subsong BEFORE calling play().
-  // play() calls reset() internally, which reads curSubSong to commit
-  // speed, BPM, virtual tempo, hz, etc. to the chip emulator state.
-  // If we select after play(), those parameters are already baked in from
-  // subsong 0 and the chip runs at the wrong tempo regardless of curSubSong.
-  if (gCurrentSubsong > 0)
-    selectSubsong(&gEngine, gCurrentSubsong);
+  // Re-select after calcSongTimestamps (which may have reset curSubSong),
+  // so play() initialises the chip from the correct subsong.
+  selectSubsong(&gEngine, subsongIdx < (int)gEngine.song.subsong.size()
+                          ? subsongIdx : 0);
 
   gEngine.play();
 
@@ -1695,17 +1692,17 @@ static FurExtReadHandle* extReadOpenW(const wchar_t* fn,
 
   if (!eng->load(buf, bufLen, path.c_str())) { delete[] buf; return nullptr; }
 
-  // Switch to the requested subsong before calculating timestamps.
-  if (subsongIdx > 0 && subsongIdx < (int)eng->song.subsong.size())
-    selectSubsong(eng, subsongIdx);
-
+  int extTargetIdx = (subsongIdx > 0 && subsongIdx < (int)eng->song.subsong.size())
+                     ? subsongIdx : 0;
+  selectSubsong(eng, extTargetIdx);
   eng->calcSongTimestamps();
+  selectSubsong(eng, extTargetIdx);
 
   int channels   = 2;
   int sampleRate = 44100;
 
   DivSubSong* sub = eng->curSubSong;
-  double      hz  = (double)eng->getCurHz();
+  double      hz  = (sub && sub->hz > 0.0f) ? (double)sub->hz : 60.0;
   int lengthMs = (sub && hz > 0.0 && sub->ts.totalTicks > 0)
     ? (int)((double)sub->ts.totalTicks / hz * 1000.0) : 0;
 
@@ -1788,10 +1785,7 @@ extern "C" {
   {
     FurExtReadHandle* h = (FurExtReadHandle*)handle;
 
-    int order = 0;
-    int row   = 0;
-    int tick  = 0;
-    int speed = 0;
+    int order = 0, row = 0, tick = 0, speed = 0;
 
     // -------------------------------------------------------------------------
     // Validate arguments.
@@ -1834,82 +1828,72 @@ extern "C" {
 
 
       // ---------------------------------------------------------------------
-      // NOW query playback position.
+      // query playback position.
       // ---------------------------------------------------------------------
+        h->eng->getPlayPosTick(order, row, tick, speed);
 
+        // we dont seek, or pause, or throttle
 
-        h->eng->getPlayPosTick(
-          order,
-          row,
-          tick,
-          speed);
+        if (sub) {
+          if (hasEffectInCurrentRowExt(h->eng, 0xFF)) {
+            // Handle FFxx (stop song) detection
+            h->done = true;
+            break;
+          }
+
+          if ( (hasEffectInCurrentRowExt(h->eng, 0x0B)) && (order == sub->ordersLen - 1) ) {
+            // Handle 0Bxx detection
+            h->done = true;
+            break;
+          }
+        }
 
       // ---------------------------------------------------------------------
-      // Generate audio FIRST.
+      // Generate audio.
       // ---------------------------------------------------------------------
-      h->eng->nextBuf(
-        NULL,
-        outs,
-        0,
-        h->channels,
-        RENDER_CHUNK_SAMPLES);
+      int orderBefore = order, rowBefore = row;
+      h->eng->nextBuf(NULL, outs, 0, h->channels, RENDER_CHUNK_SAMPLES);
 
-      short* out16 =
-      (short*)(dest + written);
+      short* out16 = (short*)(dest + written);
 
       for (int i = 0; i < RENDER_CHUNK_SAMPLES; i++) {
-
-        float l = h->chL[i];
-
-        if (l > 1.f)  l = 1.f;
-        if (l < -1.f) l = -1.f;
-
-        out16[i * h->channels] =
-        (short)(l * 32767.f);
-
         if (h->channels == 2) {
-
-          float r = h->chR[i];
-
-          if (r > 1.f)  r = 1.f;
-          if (r < -1.f) r = -1.f;
-
-          out16[i * 2 + 1] =
-          (short)(r * 32767.f);
+          float l = h->chL[i]; if (l > 1.f)  l = 1.f; if (l < -1.f) l = -1.f;
+          float r = h->chR[i]; if (r > 1.f)  r = 1.f; if (r < -1.f) r = -1.f;
+          out16[i * 2 + 0] = (short)(l * 32767.f);
+          out16[i * 2 + 1] = (short)(r * 32767.f);
+        } else { // there simply is no conceivable way we'll have more than 2 channels
+          // and if you think otherwise, you're wrong and stupid
+          float l = h->chL[i]; if (l > 1.f)  l = 1.f; if (l < -1.f) l = -1.f;
+          float r = h->chR[i]; if (r > 1.f)  r = 1.f; if (r < -1.f) r = -1.f;
+          out16[i] = ((short)(l * 32767.f) + (short)(r * 32767.f)) / 2;
         }
       }
 
       if (sub) {
+        int orderAfter = 0, rowAfter = 0, tickAfter = 0, speedAfter = 0;
+        h->eng->getPlayPosTick(orderAfter, rowAfter, tickAfter, speedAfter);
+
         bool wrapped = false;
-
         if (sub->ordersLen > 1) {
-
-          if (h->prevOrder != -1 &&
-            h->prevOrder == sub->ordersLen - 1 &&
-            order == 0)
-          {
+          // multi-order: order went backwards (looped)
+          if (orderBefore == sub->ordersLen - 1 && orderAfter < orderBefore)
             wrapped = true;
-          }
-
         } else {
-
-          if (h->prevRow != -1 &&
-            row < h->prevRow)
-          {
+          // single-order: row went backwards within the pattern
+          if (rowAfter < rowBefore)
             wrapped = true;
-          }
         }
 
-        if (wrapped ||
-          hasEffectInCurrentRowExt(h->eng, 0xFF) ||
-          hasEffectInCurrentRowExt(h->eng, 0x0B))
-        {
+        if (wrapped) {
           h->done = true;
           break;
         }
 
-        h->prevOrder = order;
-        h->prevRow   = row;
+        h->prevOrder = orderAfter;
+        h->prevRow   = rowAfter;
+        order     = orderAfter;
+        row       = rowAfter;
       }
 
 
