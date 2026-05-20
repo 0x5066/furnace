@@ -1368,7 +1368,7 @@ if (BUILD_WINAMP_PLUGIN)
   )
 
   #target_compile_options(in_furnace PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS} -O0 -g3)
-  target_compile_options(in_furnace PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS})
+  target_compile_options(in_furnace PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS} -DNDEBUG)
 
   # Link the same dependency libraries as the main executable,
   # plus the Windows multimedia / COM libraries needed by Winamp plugins.

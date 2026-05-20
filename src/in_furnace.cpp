@@ -149,11 +149,8 @@ static void selectSubsong(DivEngine* eng, int idx) {
   if (!eng) return;
   if (idx < 0 || idx >= (int)eng->song.subsong.size()) return;
   eng->curSubSong = eng->song.subsong[idx];
-  eng->curOrders  = &eng->curSubSong->orders;
-  // Each DivSubSong owns its own DivChannelData pat[] array; curPat is a
-  // DivChannelData* pointing into it.  Without this update the render loop
-  // reads patterns from subsong 0 even though curOrders is correct.
-  eng->curPat     = eng->curSubSong->pat;
+  eng->curPat     = eng->song.subsong[idx]->pat;
+  eng->curOrders  = &eng->song.subsong[idx]->orders;
 }
 
 // Return true if the playlist already contains a "?subsong=1" entry for
