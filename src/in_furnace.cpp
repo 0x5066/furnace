@@ -1499,6 +1499,20 @@ static int getExtendedFileInfoW_internal(
 
   FurFileInfo info = {};
 
+  std::wstring fileName;
+
+  // Build filename stem from path
+  if (resolvedFn && resolvedFn[0]) {
+    const wchar_t* slash = wcsrchr(resolvedFn, L'\\');
+    if (!slash) slash = wcsrchr(resolvedFn, L'/');
+
+    fileName = slash ? slash + 1 : resolvedFn;
+
+    size_t dot = fileName.find_last_of(L'.');
+    if (dot != std::wstring::npos)
+      fileName.erase(dot);
+  }
+
   if (isCurrent && gCurrentFile[0]) {
     // fast path: pull directly from the running engine
     info.title        = utf8To16(gEngine.song.name.c_str()).c_str();
@@ -1557,13 +1571,15 @@ static int getExtendedFileInfoW_internal(
 
   OutputDebugString(keyy);
   if (!_stricmp(key, "title")) {
+    const wchar_t* finalTitle = !info.title.empty() ? info.title.c_str() : fileName.c_str();
+
     if (info.subsongCount > 1) {
       if (!info.subsongName.empty())
-        _snwprintf(ret, retlen - 1, L"%s [%s]", info.subsongName.c_str(), info.title.c_str());
-      else
-        _snwprintf(ret, retlen - 1, L"<no name> [%s]", info.title.c_str());
+        _snwprintf(ret, retlen - 1, L"%s [%s]", info.subsongName.c_str(), finalTitle);
+        else
+          _snwprintf(ret, retlen - 1, L"<no name> [%s]", finalTitle);
     } else {
-      _snwprintf(ret, retlen - 1, L"%s", info.title.c_str());
+      _snwprintf(ret, retlen - 1, L"%s", finalTitle);
     }
   } else if (!_stricmp(key, "artist")) {
     _snwprintf(ret, retlen - 1, L"%s", info.author.c_str());
