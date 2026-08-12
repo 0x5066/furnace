@@ -22,13 +22,14 @@
 #include "gui.h"
 #include "misc/cpp/imgui_stdlib.h"
 #include <imgui.h>
+#include <klattsch/banks.hpp>
 
-bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& flags, bool modifyOnChange, bool fromMenu) {
+bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& flags, unsigned short& systemChans, bool modifyOnChange, bool fromMenu) {
   bool altered=false;
   bool mustRender=false;
   bool restart=modifyOnChange;
   bool supportsCustomRate=true;
-  bool supportsChannelCount=(chan>=0);
+  bool supportsChannelCount=true;
 
   switch (type) {
     case DIV_SYSTEM_YM2612:
@@ -1295,13 +1296,12 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
         altered=true;
       }
       ImGui::Unindent();
-      if (chan>=0) {
-        if (channels!=e->song.systemChans[chan]) {
-          pushWarningColor(true);
-          ImGui::Text(_("the legacy channel limit is not equal to the channel count!\neither set the channel count to %d, or click one of the following buttons:"),channels);
-          if (ImGui::Button(_("Fix channel count"))) {
+      if (channels!=systemChans) {
+        pushWarningColor(true);
+        ImGui::Text(_("the legacy channel limit is not equal to the channel count!\neither set the channel count to %d, or click one of the following buttons:"),channels);
+        if (ImGui::Button(_("Fix channel count"))) {
+          if (chan>=0) {
             if (e->setSystemChans(chan,channels,preserveChanPos)) {
-              MARK_MODIFIED;
               recalcTimestamps=true;
               if (e->song.autoSystem) {
                 autoDetectSystem();
@@ -1310,13 +1310,16 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
               updateROMExportAvail();
               altered=true;
             }
-          }
-          if (ImGui::Button(_("Give me more channels"))) {
-            channels=e->song.systemChans[chan];
+          } else {
+            systemChans=channels;
             altered=true;
           }
-          popWarningColor();
         }
+        if (ImGui::Button(_("Give me more channels"))) {
+          channels=systemChans;
+          altered=true;
+        }
+        popWarningColor();
       }
       if (ImGui::Checkbox(_("Disable hissing"),&multiplex)) {
         altered=true;
@@ -1348,7 +1351,7 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
 
       int minChans=5;
       if (chan>=0) {
-        minChans=e->song.systemChans[chan];
+        minChans=systemChans;
         if (minChans>32) minChans=32;
       }
 
@@ -2544,6 +2547,27 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       }
       break;
     }
+    case DIV_SYSTEM_KLATTSCH: {
+      supportsCustomRate=false;
+      String bankName=flags.getString("bank","ja-mokhtari-2000");
+
+      ImGui::TextUnformatted(_("Phoneme bank:"));
+      ImGui::Indent();
+      for (const std::string& b: klattsch::builtInBanks().list()) {
+        if (ImGui::RadioButton(b.c_str(),bankName==b.c_str())) {
+          bankName=b;
+          altered=true;
+        }
+      }
+      ImGui::Unindent();
+
+      if (altered) {
+        e->lockSave([&]() {
+          flags.set("bank",bankName);
+        });
+      }
+      break;
+    }
     case DIV_SYSTEM_SUPERVISION: {
       bool swapDuty=flags.getInt("swapDuty",true);
 
@@ -2995,29 +3019,39 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       supportsChannelCount=false;
     }
     if (!supportsChannelCount) {
-      if (e->song.systemChans[chan]!=sysDef->channels) {
+      if (systemChans!=sysDef->channels) {
         ImGui::Separator();
         separatedYet=true;
 
         ImGui::TextUnformatted(_("irregular channel count detected!"));
         if (ImGui::Button(_("click here to fix it."))) {
-          if (e->setSystemChans(chan,sysDef->channels,preserveChanPos)) {
-            MARK_MODIFIED;
-            recalcTimestamps=true;
-            if (e->song.autoSystem) {
-              autoDetectSystem();
-            }
-            updateWindowTitle();
-            updateROMExportAvail();
-
-            if (type==DIV_SYSTEM_N163) {
-              e->lockSave([&]() {
-                flags.set("channels",e->song.systemChans[chan]-1);
-              });
+          if (chan>=0) {
+            if (e->setSystemChans(chan,sysDef->channels,preserveChanPos)) {
               altered=true;
+              recalcTimestamps=true;
+              if (e->song.autoSystem) {
+                autoDetectSystem();
+              }
+              updateWindowTitle();
+              updateROMExportAvail();
+
+              if (type==DIV_SYSTEM_N163) {
+                e->lockSave([&]() {
+                  flags.set("channels",e->song.systemChans[chan]-1);
+                });
+              }
+            } else {
+              showError(e->getLastError());
             }
-          } else {
-            showError(e->getLastError());
+          }
+        } else {
+          systemChans=sysDef->channels;
+          altered=true;
+
+          if (type==DIV_SYSTEM_N163) {
+            e->lockSave([&]() {
+              flags.set("channels",systemChans-1);
+            });
           }
         }
       }
@@ -3026,7 +3060,7 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
   if (supportsChannelCount) {
     ImGui::Separator();
     separatedYet=true;
-    int chCount=e->song.systemChans[chan];
+    int chCount=systemChans;
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(_("Channels"));
     ImGui::SameLine();
@@ -3037,24 +3071,33 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
         if (chCount>sysDef->maxChans) chCount=sysDef->maxChans;
       }
     }
-    if (ImGui::IsItemDeactivatedAfterEdit() && chCount!=e->song.systemChans[chan]) {
-      if (e->setSystemChans(chan,chCount,preserveChanPos)) {
-        MARK_MODIFIED;
-        recalcTimestamps=true;
-        if (e->song.autoSystem) {
-          autoDetectSystem();
+    if (ImGui::IsItemDeactivatedAfterEdit() && chCount!=systemChans) {
+      altered=true;
+      if (chan>=0) {
+        if (e->setSystemChans(chan,chCount,preserveChanPos)) {
+          recalcTimestamps=true;
+          if (e->song.autoSystem) {
+            autoDetectSystem();
+          }
+          updateWindowTitle();
+          updateROMExportAvail();
+
+          if (type==DIV_SYSTEM_N163) {
+            e->lockSave([&]() {
+              flags.set("channels",e->song.systemChans[chan]-1);
+            });
+          }
+        } else {
+          showError(e->getLastError());
         }
-        updateWindowTitle();
-        updateROMExportAvail();
+      } else {
+        systemChans=chCount;
 
         if (type==DIV_SYSTEM_N163) {
           e->lockSave([&]() {
-            flags.set("channels",e->song.systemChans[chan]-1);
+            flags.set("channels",systemChans-1);
           });
-          altered=true;
         }
-      } else {
-        showError(e->getLastError());
       }
     }
     if (sysDef!=NULL) {
@@ -3099,7 +3142,6 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       }
       updateWindowTitle();
     }
-    MARK_MODIFIED;
   }
 
   return altered;
